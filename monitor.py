@@ -127,21 +127,43 @@ def yahoo_title_ok(title):
     return not any(x.lower() in low for x in YAHOO_EXCLUDE)
 
 
+def get_yahoo(kw):
+    """请求一个关键词，遇到 5xx 或网络错误最多重试 3 次。返回 response，404 返回 None。"""
+    last = ""
+    for i in range(3):
+        try:
+            r = requests.get(
+                "https://auctions.yahoo.co.jp/search/search",
+                params={"p": kw, "s1": "new", "o1": "d"},
+                headers=HEADERS,
+                timeout=30,
+            )
+            if r.status_code == 404:
+                return None
+            if r.status_code == 200:
+                return r
+            last = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            last = type(e).__name__
+        time.sleep(3 * (i + 1))
+    raise RuntimeError(last)
+
+
 def fetch_yahoo():
     items = []
+    failed = []
     for kw in YAHOO_KEYWORDS:
-        r = requests.get(
-            "https://auctions.yahoo.co.jp/search/search",
-            params={"p": kw, "s1": "new", "o1": "d"},
-            headers=HEADERS,
-            timeout=30,
-        )
-        if r.status_code == 404:
+        try:
+            r = get_yahoo(kw)
+        except RuntimeError as e:
+            print(f"失败: {kw} ({e})")
+            failed.append(kw)
+            time.sleep(2)
+            continue
+        if r is None:
             print(f"无结果: {kw}")
             time.sleep(2)
             continue
-        if r.status_code != 200:
-            raise RuntimeError(f"雅虎拍卖「{kw}」无法访问 (HTTP {r.status_code})")
         soup = BeautifulSoup(r.text, "html.parser")
 
         # 同一件拍品有多个链接（图片、标题、"New!!"标签等），每件取最长的文字当标题
@@ -160,6 +182,10 @@ def fetch_yahoo():
             if yahoo_title_ok(title):
                 items.append((f"yahoo:{aid}", title, href))
         time.sleep(2)
+
+    # 只有全部关键词都失败才算整站故障；个别失败下次运行会自动重试
+    if failed and len(failed) == len(YAHOO_KEYWORDS):
+        raise RuntimeError("雅虎拍卖所有关键词都无法访问")
     return items
 
 
