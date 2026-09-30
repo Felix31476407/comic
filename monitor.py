@@ -26,20 +26,17 @@ TIEBA_KEYWORDS = [
 YAHOO_KEYWORDS = [
     "NARUTO ナルト 全巻",
     "BLEACH ブリーチ 全巻",
-    "FAIRY TAIL フェアリーテイル 全巻",
-    "ドラゴンボール 全巻",
+    "呪術廻戦 全巻",
     "NARUTO ナルト コンビニ コミック セット",
     "BLEACH ブリーチ コンビニ コミック セット",
-    "FAIRY TAIL フェアリーテイル コンビニ コミック セット",
-    "ドラゴンボール コンビニ コミック セット",
+    "呪術廻戦 コンビニ コミック セット",
     "NARUTO ナルト リミックス コミック セット",
     "BLEACH ブリーチ リミックス コミック セット",
-    "FAIRY TAIL フェアリーテイル リミックス コミック セット",
-    "ドラゴンボール リミックス コミック セット",
+    "呪術廻戦 リミックス コミック セット",
 ]
 
 # 雅虎标题过滤：必须提到你要的作品
-YAHOO_SERIES_RE = r"NARUTO|ナルト|BLEACH|ブリーチ|FAIRY\s*TAIL|フェアリーテイル|ドラゴンボール|DRAGON\s*BALL"
+YAHOO_SERIES_RE = r"NARUTO|ナルト|BLEACH|ブリーチ|呪術廻戦|呪術|JUJUTSU\s*KAISEN"
 # 雅虎标题过滤：必须像"整套"（全巻、セット、まとめ、1-72巻 等）
 YAHOO_SET_RE = r"全\s*\d*\s*巻|セット|まとめ|一括|完結|\d+\s*[-~〜～]\s*\d+\s*巻?"
 # 雅虎标题过滤：出现这些词就丢掉（周边、影像、游戏等）
@@ -51,6 +48,14 @@ YAHOO_EXCLUDE = [
 
 # 煤炉（Mercari）：默认和雅虎用同一批搜索词，标题过滤规则也共用
 MERCARI_KEYWORDS = YAHOO_KEYWORDS
+
+# 按作品排除：(作品名正则, 排除正则)。标题同时命中两者就丢掉。
+# 火影 72 巻、死神 74 巻、咒术 30/31 巻是普通单行本全套，不要，只要便利店版 / remix 版
+YAHOO_SERIES_EXCLUDE = [
+    (r"NARUTO|ナルト", r"72\s*[巻冊卷]|全\s*72|[-~〜～]\s*72"),
+    (r"BLEACH|ブリーチ", r"74\s*[巻冊卷]|全\s*74|[-~〜～]\s*74"),
+    (r"呪術|JUJUTSU", r"3[01]\s*[巻冊卷]|全\s*3[01]|[-~〜～]\s*3[01]"),
+]
 
 MAX_PUSH_PER_RUN = 20  # 单次最多推送条数，防止刷屏
 
@@ -128,7 +133,12 @@ def yahoo_title_ok(title):
     if not re.search(YAHOO_SET_RE, title):
         return False
     low = title.lower()
-    return not any(x.lower() in low for x in YAHOO_EXCLUDE)
+    if any(x.lower() in low for x in YAHOO_EXCLUDE):
+        return False
+    for series_re, ex_re in YAHOO_SERIES_EXCLUDE:
+        if re.search(series_re, title, re.I) and re.search(ex_re, title):
+            return False
+    return True
 
 
 def get_yahoo(kw):
