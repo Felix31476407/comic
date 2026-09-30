@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -9,7 +10,7 @@ from bs4 import BeautifulSoup
 
 # ============ 配置区（只改这里）============
 
-# 贴吧：要盯的吧名（不带"吧"字），请换成你实际常看的二手漫画吧
+# 贴吧：要盯的吧名（不带"吧"字）
 TIEBA_FORUMS = ["漫画买卖", "漫画交易"]
 
 # 贴吧标题里出现任一关键词就推送（不区分大小写）
@@ -20,20 +21,31 @@ TIEBA_KEYWORDS = [
     "七龙珠", "七龍珠", "dragon ball",
 ]
 
-# 雅虎拍卖日本：直接用日文关键词搜索，按最新上架排序
+# 雅虎拍卖日本：搜索词（按最新上架排序）
 YAHOO_KEYWORDS = [
     "NARUTO ナルト 全巻",
     "BLEACH ブリーチ 全巻",
     "FAIRY TAIL フェアリーテイル 全巻",
     "ドラゴンボール 全巻",
-    "NARUTO ナルト コンビニ コミック",
-    "BLEACH ブリーチ コンビニ コミック",
-    "FAIRY TAIL フェアリーテイル コンビニ コミック",
-    "ドラゴンボール コンビニ コミック",
-    "NARUTO ナルト リミックス コミック",
-    "BLEACH ブリーチ リミックス コミック",
-    "FAIRY TAIL フェアリーテイル リミックス コミック",
-    "ドラゴンボール リミックス コミック",
+    "NARUTO ナルト コンビニ コミック セット",
+    "BLEACH ブリーチ コンビニ コミック セット",
+    "FAIRY TAIL フェアリーテイル コンビニ コミック セット",
+    "ドラゴンボール コンビニ コミック セット",
+    "NARUTO ナルト リミックス コミック セット",
+    "BLEACH ブリーチ リミックス コミック セット",
+    "FAIRY TAIL フェアリーテイル リミックス コミック セット",
+    "ドラゴンボール リミックス コミック セット",
+]
+
+# 雅虎标题过滤：必须提到你要的作品
+YAHOO_SERIES_RE = r"NARUTO|ナルト|BLEACH|ブリーチ|FAIRY\s*TAIL|フェアリーテイル|ドラゴンボール|DRAGON\s*BALL"
+# 雅虎标题过滤：必须像"整套"（全巻、セット、まとめ、1-72巻 等）
+YAHOO_SET_RE = r"全\s*\d*\s*巻|セット|まとめ|一括|完結|\d+\s*[-~〜～]\s*\d+\s*巻?"
+# 雅虎标题过滤：出现这些词就丢掉（周边、影像、游戏等）
+YAHOO_EXCLUDE = [
+    "フィギュア", "DVD", "Blu-ray", "ブルーレイ", "ゲーム", "カード",
+    "ポスター", "食玩", "ガシャ", "プラモ", "キーホルダー", "ストラップ",
+    "Tシャツ", "小説", "画集", "サントラ", "CD", "ぬいぐるみ", "缶バッジ",
 ]
 
 MAX_PUSH_PER_RUN = 20  # 单次最多推送条数，防止刷屏
@@ -91,7 +103,6 @@ def fetch_tieba():
         html = r.text
         if r.status_code != 200 or "安全验证" in html:
             raise RuntimeError(f"贴吧「{forum}」被拦截或无法访问 (HTTP {r.status_code})")
-        # 贴吧把部分帖子列表放在 HTML 注释里，先去掉注释符号
         html = html.replace("<!--", "").replace("-->", "")
         soup = BeautifulSoup(html, "html.parser")
         found = set()
@@ -107,6 +118,15 @@ def fetch_tieba():
     return items
 
 
+def yahoo_title_ok(title):
+    if not re.search(YAHOO_SERIES_RE, title, re.I):
+        return False
+    if not re.search(YAHOO_SET_RE, title):
+        return False
+    low = title.lower()
+    return not any(x.lower() in low for x in YAHOO_EXCLUDE)
+
+
 def fetch_yahoo():
     items = []
     for kw in YAHOO_KEYWORDS:
@@ -118,24 +138,27 @@ def fetch_yahoo():
         )
         if r.status_code == 404:
             print(f"无结果: {kw}")
+            time.sleep(2)
             continue
         if r.status_code != 200:
             raise RuntimeError(f"雅虎拍卖「{kw}」无法访问 (HTTP {r.status_code})")
         soup = BeautifulSoup(r.text, "html.parser")
-        found = set()
+
+        # 同一件拍品有多个链接（图片、标题、"New!!"标签等），每件取最长的文字当标题
+        best = {}
         for a in soup.select('a[href*="/jp/auction/"]'):
             href = a["href"].split("?")[0]
             aid = href.rstrip("/").split("/")[-1]
-            if aid in found:
-                continue
-            title = a.get_text(strip=True)
-            if not title:
-                img = a.find("img")
-                title = (img.get("alt") if img else "") or ""
-            if not title:
-                continue
-            found.add(aid)
-            items.append((f"yahoo:{aid}", title, href))
+            texts = [a.get_text(strip=True)]
+            for img in a.find_all("img"):
+                texts.append((img.get("alt") or "").strip())
+            title = max(texts, key=len)
+            if aid not in best or len(title) > len(best[aid][0]):
+                best[aid] = (title, href)
+
+        for aid, (title, href) in best.items():
+            if yahoo_title_ok(title):
+                items.append((f"yahoo:{aid}", title, href))
         time.sleep(2)
     return items
 
