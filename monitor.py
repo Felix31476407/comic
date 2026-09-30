@@ -116,8 +116,11 @@ def fetch_yahoo():
             headers=HEADERS,
             timeout=30,
         )
+        if r.status_code == 404:
+            print(f"无结果: {kw}")
+            continue
         if r.status_code != 200:
-            raise RuntimeError(f"雅虎拍卖无法访问 (HTTP {r.status_code})")
+            raise RuntimeError(f"雅虎拍卖「{kw}」无法访问 (HTTP {r.status_code})")
         soup = BeautifulSoup(r.text, "html.parser")
         found = set()
         for a in soup.select('a[href*="/jp/auction/"]'):
