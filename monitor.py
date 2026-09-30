@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 # ============ 配置区（只改这里）============
 
 # 贴吧：要盯的吧名（不带"吧"字），请换成你实际常看的二手漫画吧
-TIEBA_FORUMS = ["漫画二手"]
+TIEBA_FORUMS = ["漫画买卖", "漫画交易"]
 
 # 贴吧标题里出现任一关键词就推送（不区分大小写）
 TIEBA_KEYWORDS = [
