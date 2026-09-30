@@ -4,6 +4,7 @@ import re
 import time
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -47,6 +48,9 @@ YAHOO_EXCLUDE = [
     "ポスター", "食玩", "ガシャ", "プラモ", "キーホルダー", "ストラップ",
     "Tシャツ", "小説", "画集", "サントラ", "CD", "ぬいぐるみ", "缶バッジ",
 ]
+
+# 煤炉（Mercari）：默认和雅虎用同一批搜索词，标题过滤规则也共用
+MERCARI_KEYWORDS = YAHOO_KEYWORDS
 
 MAX_PUSH_PER_RUN = 20  # 单次最多推送条数，防止刷屏
 
@@ -189,13 +193,60 @@ def fetch_yahoo():
     return items
 
 
+def fetch_mercari():
+    """煤炉页面靠 JS 渲染，用无头浏览器打开。"""
+    from playwright.sync_api import sync_playwright
+
+    items = []
+    total_cells = 0
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        ctx = browser.new_context(locale="ja-JP", user_agent=HEADERS["User-Agent"])
+        page = ctx.new_page()
+        for kw in MERCARI_KEYWORDS:
+            url = "https://jp.mercari.com/search?" + urlencode(
+                {"keyword": kw, "sort": "created_time", "order": "desc", "status": "on_sale"}
+            )
+            try:
+                page.goto(url, timeout=45000)
+                page.wait_for_selector('a[href^="/item/m"]', timeout=20000)
+            except Exception as e:
+                print(f"煤炉无结果或超时: {kw} ({type(e).__name__})")
+                continue
+            rows = page.eval_on_selector_all(
+                'a[href^="/item/m"]',
+                """els => els.map(e => {
+                    const l = e.querySelector('[aria-label]');
+                    return {href: e.getAttribute('href'),
+                            text: e.innerText || '',
+                            label: l ? (l.getAttribute('aria-label') || '') : ''};
+                })""",
+            )
+            total_cells += len(rows)
+            best = {}
+            for row in rows:
+                aid = row["href"].split("?")[0].rstrip("/").split("/")[-1]
+                title = max([row["label"], row["text"].replace("\n", " ")], key=len)
+                title = title.replace("の画像", "").strip()
+                if aid not in best or len(title) > len(best[aid]):
+                    best[aid] = title
+            for aid, title in best.items():
+                if yahoo_title_ok(title):
+                    items.append((f"mercari:{aid}", title, f"https://jp.mercari.com/item/{aid}"))
+            time.sleep(2)
+        browser.close()
+    if total_cells == 0:
+        raise RuntimeError("煤炉所有关键词都没抓到商品（可能被拦或页面改版）")
+    return items
+
+
 def main():
     state, first_run = load_state()
     seen = set(state["seen"])
     today = str(date.today())
     new_items = []
 
-    for name, fn in [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo)]:
+    for name, fn in [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo), ("煤炉", fetch_mercari)]:
         try:
             for uid, title, link in fn():
                 if uid not in seen:
