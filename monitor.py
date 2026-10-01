@@ -4,7 +4,7 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -49,8 +49,47 @@ YAHOO_EXCLUDE = [
     "Tシャツ", "小説", "画集", "サントラ", "CD", "ぬいぐるみ", "缶バッジ",
 ]
 
-# 煤炉（Mercari）：默认和雅虎用同一批搜索词，标题过滤规则也共用
-MERCARI_KEYWORDS = YAHOO_KEYWORDS
+# 浏览器抓取的日本平台：默认和雅虎用同一批搜索词，标题过滤规则也共用
+BROWSER_KEYWORDS = YAHOO_KEYWORDS
+
+# 每个平台：名称、搜索页地址、商品链接的选择器、站点根地址
+BROWSER_SITES = [
+    {
+        "name": "煤炉",
+        "tag": "mercari",
+        "url": lambda kw: "https://jp.mercari.com/search?" + urlencode(
+            {"keyword": kw, "sort": "created_time", "order": "desc", "status": "on_sale"}),
+        "sel": 'a[href^="/item/m"]',
+        "base": "https://jp.mercari.com",
+    },
+    {
+        "name": "Rakuma",
+        "tag": "rakuma",
+        "url": lambda kw: "https://fril.jp/s?" + urlencode(
+            {"query": kw, "sort": "created_at", "order": "desc"}),
+        "sel": 'a[href*="item.fril.jp/"]',
+        "base": "https://fril.jp",
+    },
+    {
+        "name": "PayPay跳蚤市场",
+        "tag": "paypay",
+        "url": lambda kw: "https://paypayfleamarket.yahoo.co.jp/search/" + quote(kw)
+            + "?sort=openTime&order=desc",
+        "sel": 'a[href^="/item/"]',
+        "base": "https://paypayfleamarket.yahoo.co.jp",
+    },
+    {
+        "name": "骏河屋",
+        "tag": "surugaya",
+        "url": lambda kw: "https://www.suruga-ya.jp/search?" + urlencode(
+            {"category": "", "search_word": kw, "adult_s": "1"}),
+        "sel": 'a[href*="/product/detail/"]',
+        "base": "https://www.suruga-ya.jp",
+    },
+]
+
+TIME_BUDGET = 11 * 60  # 浏览器抓取总用时上限（秒），超出就跳过剩余部分
+START_TIME = time.time()
 
 # 按作品排除：(作品名正则, 排除正则)。标题同时命中两者就丢掉。
 # 火影 72 巻、死神 74 巻、咒术 30/31 巻、银魂 77 巻是普通单行本全套，不要，只要便利店版 / remix 版
@@ -207,8 +246,8 @@ def fetch_yahoo():
     return items
 
 
-def fetch_mercari():
-    """煤炉页面靠 JS 渲染，用无头浏览器打开。"""
+def fetch_browser_site(site):
+    """用无头浏览器抓一个平台（页面靠 JS 渲染或有反爬时用）。"""
     from playwright.sync_api import sync_playwright
 
     items = []
@@ -217,40 +256,44 @@ def fetch_mercari():
         browser = p.chromium.launch()
         ctx = browser.new_context(locale="ja-JP", user_agent=HEADERS["User-Agent"])
         page = ctx.new_page()
-        for kw in MERCARI_KEYWORDS:
-            url = "https://jp.mercari.com/search?" + urlencode(
-                {"keyword": kw, "sort": "created_time", "order": "desc", "status": "on_sale"}
-            )
+        for kw in BROWSER_KEYWORDS:
+            if time.time() - START_TIME > TIME_BUDGET:
+                print(f"{site['name']}: 已超时间预算，跳过剩余关键词")
+                break
             try:
-                page.goto(url, timeout=45000)
-                page.wait_for_selector('a[href^="/item/m"]', timeout=20000)
+                page.goto(site["url"](kw), timeout=45000)
+                page.wait_for_selector(site["sel"], timeout=20000)
             except Exception as e:
-                print(f"煤炉无结果或超时: {kw} ({type(e).__name__})")
+                print(f"{site['name']} 无结果或超时: {kw} ({type(e).__name__})")
                 continue
             rows = page.eval_on_selector_all(
-                'a[href^="/item/m"]',
+                site["sel"],
                 """els => els.map(e => {
                     const l = e.querySelector('[aria-label]');
+                    const i = e.querySelector('img');
                     return {href: e.getAttribute('href'),
                             text: e.innerText || '',
-                            label: l ? (l.getAttribute('aria-label') || '') : ''};
+                            title: e.getAttribute('title') || '',
+                            label: l ? (l.getAttribute('aria-label') || '') : '',
+                            alt: i ? (i.getAttribute('alt') || '') : ''};
                 })""",
             )
             total_cells += len(rows)
             best = {}
             for row in rows:
-                aid = row["href"].split("?")[0].rstrip("/").split("/")[-1]
-                title = max([row["label"], row["text"].replace("\n", " ")], key=len)
-                title = title.replace("の画像", "").strip()
-                if aid not in best or len(title) > len(best[aid]):
-                    best[aid] = title
-            for aid, title in best.items():
+                full = urljoin(site["base"], row["href"]).split("?")[0].split("#")[0]
+                aid = full.rstrip("/").split("/")[-1]
+                cands = [row["label"], row["alt"], row["title"], row["text"].replace("\n", " ")]
+                title = max(cands, key=len).replace("の画像", "").strip()
+                if aid not in best or len(title) > len(best[aid][0]):
+                    best[aid] = (title, full)
+            for aid, (title, full) in best.items():
                 if yahoo_title_ok(title):
-                    items.append((f"mercari:{aid}", title, f"https://jp.mercari.com/item/{aid}"))
+                    items.append((f"{site['tag']}:{aid}", title, full))
             time.sleep(2)
         browser.close()
     if total_cells == 0:
-        raise RuntimeError("煤炉所有关键词都没抓到商品（可能被拦或页面改版）")
+        raise RuntimeError(f"{site['name']}所有关键词都没抓到商品（可能被拦或页面改版）")
     return items
 
 
@@ -260,7 +303,11 @@ def main():
     today = str(date.today())
     new_items = []
 
-    for name, fn in [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo), ("煤炉", fetch_mercari)]:
+    sources = [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo)]
+    for site in BROWSER_SITES:
+        sources.append((site["name"], lambda st=site: fetch_browser_site(st)))
+
+    for name, fn in sources:
         try:
             for uid, title, link in fn():
                 if uid not in seen:
