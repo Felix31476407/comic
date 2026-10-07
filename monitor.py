@@ -44,9 +44,15 @@ YAHOO_SERIES_RE = r"NARUTO|ナルト|BLEACH|ブリーチ|呪術廻戦|呪術|JUJ
 YAHOO_SET_RE = r"全\s*\d*\s*巻|セット|まとめ|一括|完結|\d+\s*[-~〜～]\s*\d+\s*巻?"
 # 雅虎标题过滤：出现这些词就丢掉（周边、影像、游戏等）
 YAHOO_EXCLUDE = [
+    # 周边、影像、游戏等非漫画
     "フィギュア", "DVD", "Blu-ray", "ブルーレイ", "ゲーム", "カード",
     "ポスター", "食玩", "ガシャ", "プラモ", "キーホルダー", "ストラップ",
     "Tシャツ", "小説", "画集", "サントラ", "CD", "ぬいぐるみ", "缶バッジ",
+    "アクリル", "タペストリー", "クリアファイル", "コスプレ", "ウィッグ",
+    # 一番赏相关
+    "一番くじ", "一番賞", "一番赏", "ラストワン",
+    # 鬼灭之刃相关
+    "鬼滅", "鬼灭", "きめつ", "キメツ", "KIMETSU",
 ]
 
 # 浏览器抓取的日本平台：默认和雅虎用同一批搜索词，标题过滤规则也共用
@@ -66,7 +72,7 @@ BROWSER_SITES = [
         "name": "Rakuma",
         "tag": "rakuma",
         "url": lambda kw: "https://fril.jp/s?" + urlencode(
-            {"query": kw, "sort": "created_at", "order": "desc"}),
+            {"query": kw, "sort": "created_at", "order": "desc", "transaction": "selling"}),
         "sel": 'a[href*="item.fril.jp/"]',
         "base": "https://fril.jp",
     },
@@ -98,6 +104,12 @@ YAHOO_SERIES_EXCLUDE = [
     (r"BLEACH|ブリーチ", r"74\s*[巻冊卷]|全\s*74|[-~〜～]\s*74"),
     (r"呪術|JUJUTSU", r"3[01]\s*[巻冊卷]|全\s*3[01]|[-~〜～]\s*3[01]"),
     (r"銀魂|GINTAMA", r"77\s*[巻冊卷]|全\s*77|[-~〜～]\s*77"),
+]
+
+# 卡片上出现这些词，说明已售出或不可买，直接丢掉
+SOLD_WORDS = [
+    "SOLD", "売り切れ", "売切れ", "品切れ", "販売終了", "在庫なし", "在庫切れ",
+    "取引中", "出品終了", "Sold Out", "完売",
 ]
 
 MAX_PUSH_PER_RUN = 20  # 单次最多推送条数，防止刷屏
@@ -246,6 +258,11 @@ def fetch_yahoo():
     return items
 
 
+def looks_sold(texts):
+    blob = " ".join(t for t in texts if t).lower()
+    return any(w.lower() in blob for w in SOLD_WORDS)
+
+
 def fetch_browser_site(site):
     """用无头浏览器抓一个平台（页面靠 JS 渲染或有反爬时用）。"""
     from playwright.sync_api import sync_playwright
@@ -271,7 +288,9 @@ def fetch_browser_site(site):
                 """els => els.map(e => {
                     const l = e.querySelector('[aria-label]');
                     const i = e.querySelector('img');
+                    const c = e.closest('li, article') || e.parentElement;
                     return {href: e.getAttribute('href'),
+                            card: c ? (c.innerText || '') : '',
                             text: e.innerText || '',
                             title: e.getAttribute('title') || '',
                             label: l ? (l.getAttribute('aria-label') || '') : '',
@@ -280,6 +299,7 @@ def fetch_browser_site(site):
             )
             total_cells += len(rows)
             best = {}
+            sold = set()
             for row in rows:
                 full = urljoin(site["base"], row["href"]).split("?")[0].split("#")[0]
                 aid = full.rstrip("/").split("/")[-1]
@@ -287,7 +307,13 @@ def fetch_browser_site(site):
                 title = max(cands, key=len).replace("の画像", "").strip()
                 if aid not in best or len(title) > len(best[aid][0]):
                     best[aid] = (title, full)
+                # 卡片文字太长说明抓到了整个列表容器，不能用来判断
+                card = row["card"] if len(row["card"]) < 600 else ""
+                if looks_sold(cands + [card]):
+                    sold.add(aid)
             for aid, (title, full) in best.items():
+                if aid in sold:
+                    continue
                 if yahoo_title_ok(title):
                     items.append((f"{site['tag']}:{aid}", title, full))
             time.sleep(2)
@@ -303,7 +329,8 @@ def main():
     today = str(date.today())
     new_items = []
 
-    sources = [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo)]
+    # 贴吧已停用（会被百度 403 拦截）。想恢复就把下一行改回 [("贴吧", fetch_tieba), ("雅虎拍卖", fetch_yahoo)]
+    sources = [("雅虎拍卖", fetch_yahoo)]
     for site in BROWSER_SITES:
         sources.append((site["name"], lambda st=site: fetch_browser_site(st)))
 
